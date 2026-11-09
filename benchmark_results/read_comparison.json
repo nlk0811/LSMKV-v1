@@ -1,0 +1,85 @@
+{
+  "conditions": {
+    "keys": 20000,
+    "value_bytes": 128,
+    "queries_per_kind": 100,
+    "repeats": 3,
+    "seed": 42,
+    "python": "3.14.4",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "scope": "Single open SSTable; warmed OS cache; excludes reader-open, memtable and multi-level search",
+    "sstable_bytes": 3108667
+  },
+  "results": {
+    "Present keys": {
+      "Sequential scan": {
+        "p50_us": 1605.9375,
+        "p95_us": 3582.542,
+        "lookups_per_second": 576.0766840099737,
+        "speedup_vs_sequential": 1.0,
+        "elapsed_seconds_each_repeat": [
+          0.177574457,
+          0.171976801,
+          0.173588001
+        ]
+      },
+      "Sparse index only": {
+        "p50_us": 7.2915,
+        "p95_us": 9.375,
+        "lookups_per_second": 135792.6283613768,
+        "speedup_vs_sequential": 235.719709077873,
+        "elapsed_seconds_each_repeat": [
+          0.000743748,
+          0.000708586,
+          0.000736417
+        ]
+      },
+      "Bloom + sparse index": {
+        "p50_us": 8.792,
+        "p95_us": 11.25,
+        "lookups_per_second": 111715.61672606214,
+        "speedup_vs_sequential": 193.9249058795929,
+        "elapsed_seconds_each_repeat": [
+          0.00089513,
+          0.000850416,
+          0.000926873
+        ]
+      }
+    },
+    "Missing keys": {
+      "Sequential scan": {
+        "p50_us": 1946.292,
+        "p95_us": 3621.416,
+        "lookups_per_second": 512.2677470243186,
+        "speedup_vs_sequential": 1.0,
+        "elapsed_seconds_each_repeat": [
+          0.195210416,
+          0.194117837,
+          0.196879089
+        ]
+      },
+      "Sparse index only": {
+        "p50_us": 9.334,
+        "p95_us": 10.25,
+        "lookups_per_second": 107487.81625602738,
+        "speedup_vs_sequential": 209.82741326270667,
+        "elapsed_seconds_each_repeat": [
+          0.000951712,
+          0.000930338,
+          0.000905243
+        ]
+      },
+      "Bloom + sparse index": {
+        "p50_us": 0.834,
+        "p95_us": 1.625,
+        "lookups_per_second": 763621.0912145393,
+        "speedup_vs_sequential": 1490.6679088236415,
+        "elapsed_seconds_each_repeat": [
+          0.000130955,
+          0.000102751,
+          0.000136582
+        ]
+      }
+    }
+  }
+}

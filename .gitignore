@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+demo_data/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.sst
+*.sst.tmp
+wal.log
+MANIFEST.json
+MANIFEST.json.tmp
