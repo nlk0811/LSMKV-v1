@@ -25,19 +25,30 @@ class BloomFilter:
         self.hash_count = max(1, round((self.bit_count / capacity) * math.log(2)))
         self.bits = bytearray(math.ceil(self.bit_count / 8))
 
-    # Double-hashing with a single SHA-256 call: h_i(x) = h1(x) + i*h2(x) mod m
-    def _hashes(self, key: bytes):
+    @staticmethod
+    def _seed_hashes(key: bytes):
+        """Double-hashing seeds from one SHA-256 digest (on-disk compatible)."""
         digest = hashlib.sha256(key).digest()
-        h1, h2 = struct.unpack_from('>QQ', digest, 0)
-        for i in range(self.hash_count):
-            yield (h1 + i * h2) % self.bit_count
+        return struct.unpack_from('>QQ', digest, 0)
 
     def add(self, key: bytes):
-        for pos in self._hashes(key):
-            self.bits[pos >> 3] |= 1 << (pos & 7)
+        h1, h2 = self._seed_hashes(key)
+        bits = self.bits
+        m = self.bit_count
+        for i in range(self.hash_count):
+            pos = (h1 + i * h2) % m
+            bits[pos >> 3] |= 1 << (pos & 7)
 
     def may_contain(self, key: bytes) -> bool:
-        return all(self.bits[pos >> 3] & (1 << (pos & 7)) for pos in self._hashes(key))
+        # Unrolled probe loop: avoid generator/all() overhead on the hot path.
+        h1, h2 = self._seed_hashes(key)
+        bits = self.bits
+        m = self.bit_count
+        for i in range(self.hash_count):
+            pos = (h1 + i * h2) % m
+            if not (bits[pos >> 3] & (1 << (pos & 7))):
+                return False
+        return True
 
     # ── serialization ──────────────────────────────────────────────────────────
     # Header: capacity(4I) hash_count(4I) fpr(4f) bit_count(8Q) = 20 bytes

@@ -185,6 +185,43 @@ a 789.2× ratio on that host. The dossier reports historical measurements of
 281 and 221,993, or about 790×. Explain that fsync dominates durable write cost
 on that machine; these numbers are measurements, not portable guarantees.
 
+### SQLite comparison
+
+To compare the current engine with SQLite on the same workloads, run:
+
+```sh
+for i in 1 2 3; do
+  python3 -m benchmarks.sqlite_comparison --keys 50000 \
+    --output benchmark_results/after_run$i.json
+done
+```
+
+Each report is one run on the same machine and workload; the three runs show
+consistent winners, but are indicative measurements rather than a statistical
+study. In these November 2026 runs (Python 3.14.6, macOS 27.2.1, 50,000 keys,
+128-byte values), LSMKV was faster for durable writes, sequential and random
+bulk writes, missing-key point reads, and full scans. LSMKV also used less disk
+space. SQLite remained faster for present-key point reads and 100-row range
+scans:
+
+| Workload | LSMKV result | SQLite result | Winner |
+|---|---:|---:|---|
+| Durable writes | 265–276 ops/s | 254–272 ops/s | LSMKV in all 3 runs |
+| Bulk writes, sequential | 198k–235k ops/s | 159k–169k ops/s | LSMKV in all 3 runs |
+| Bulk writes, random | 200k–213k ops/s | 109k–118k ops/s | LSMKV in all 3 runs |
+| Point read, present key (p50) | 3.6–3.7 µs | 2.2–2.3 µs | SQLite in all 3 runs |
+| Point read, missing key (p50) | 0.58–0.62 µs | 1.37–1.70 µs | LSMKV in all 3 runs |
+| Range scan, 100 rows (p50) | 37.5–38.0 µs | 31.1–32.0 µs | SQLite in all 3 runs |
+| Full scan | 3.23m–3.36m rows/s | 2.41m–2.69m rows/s | LSMKV in all 3 runs |
+| Disk usage | 7.51 MB | 8.68 MB | LSMKV in all 3 runs |
+
+The benchmark validates answers against a Python dictionary. Reads are issued
+after close and reopen, so the LSMKV read results exercise SSTables. SQLite is
+configured with WAL mode; durable writes use FULL synchronous mode and bulk
+writes use synchronous OFF. State these conditions when presenting the numbers.
+This is a workload-specific comparison, not evidence that LSMKV is faster for
+all databases or query patterns.
+
 ## Demonstrating faster retrieval
 
 Run this command in the terminal during the presentation:
@@ -226,6 +263,10 @@ A run on the validation host produced:
 The sparse index alone achieved 7.29 µs p50 for hits and 9.33 µs for misses.
 This shows that Bloom hashing adds work for hits while accelerating definite
 misses. Avoid claiming that Bloom filters make every query faster.
+
+This is a different comparison from `sqlite_comparison`: it measures an SSTable
+lookup against a sequential scan of that same SSTable, not against SQLite or
+end-to-end database reads.
 
 Say: “For this 20,000-record workload, the SSTable's Bloom-filter-and-index
 lookup achieved about 194 times the present-key throughput of a sequential
