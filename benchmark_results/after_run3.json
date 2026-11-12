@@ -1,0 +1,133 @@
+{
+  "conditions": {
+    "keys": 50000,
+    "value_bytes": 128,
+    "durable_writes": 1000,
+    "queries_per_kind": 2000,
+    "scans": 200,
+    "scan_width": 100,
+    "seed": 42,
+    "python": "3.14.6",
+    "sqlite": "3.50.4",
+    "platform": "macOS-27.2.1-arm64-arm-64bit-Mach-O",
+    "notes": "LSMKV reads come from SSTables after a close/reopen. SQLite uses WAL, WITHOUT ROWID, one autocommit transaction per put. Single run; treat ratios as indicative."
+  },
+  "durable_writes": {
+    "LSMKV": {
+      "ops": 1000,
+      "ops_per_second": 265.2486263507337,
+      "p50_us": 3981.125002610497,
+      "p95_us": 4068.9579909667373,
+      "p99_us": 4153.54099823162,
+      "mean_us": 3770.0477991456864
+    },
+    "SQLite": {
+      "ops": 1000,
+      "ops_per_second": 253.97988143663724,
+      "p50_us": 3990.832992712967,
+      "p95_us": 4080.5409953463823,
+      "p99_us": 7056.207992718555,
+      "mean_us": 3937.319737073267
+    }
+  },
+  "bulk_writes": {
+    "sequential": {
+      "LSMKV": {
+        "ops": 50000,
+        "seconds": 0.2327016659983201,
+        "ops_per_second": 214867.39162564033
+      },
+      "SQLite": {
+        "ops": 50000,
+        "seconds": 0.30188020900823176,
+        "ops_per_second": 165628.61197249463
+      }
+    },
+    "random": {
+      "LSMKV": {
+        "ops": 50000,
+        "seconds": 0.24007533300027717,
+        "ops_per_second": 208267.96062360256
+      },
+      "SQLite": {
+        "ops": 50000,
+        "seconds": 0.43309325000154786,
+        "ops_per_second": 115448.5783369316
+      }
+    }
+  },
+  "point_reads": {
+    "present": {
+      "LSMKV": {
+        "ops": 2000,
+        "ops_per_second": 129684.33607340539,
+        "p50_us": 3.6669953260570765,
+        "p95_us": 5.124995368532836,
+        "p99_us": 8.125003660097718,
+        "mean_us": 7.711031496000941
+      },
+      "SQLite": {
+        "ops": 2000,
+        "ops_per_second": 438321.63858760503,
+        "p50_us": 2.249988028779626,
+        "p95_us": 2.8340000426396728,
+        "p99_us": 3.5840057535097003,
+        "mean_us": 2.2814296899014153
+      }
+    },
+    "missing": {
+      "LSMKV": {
+        "ops": 2000,
+        "ops_per_second": 1697507.0056291856,
+        "p50_us": 0.5830079317092896,
+        "p95_us": 0.6250047590583563,
+        "p99_us": 0.7500057108700275,
+        "mean_us": 0.5890991888009012
+      },
+      "SQLite": {
+        "ops": 2000,
+        "ops_per_second": 719207.0921727213,
+        "p50_us": 1.3749959180131555,
+        "p95_us": 1.45800004247576,
+        "p99_us": 1.7499987734481692,
+        "mean_us": 1.390420104144141
+      }
+    }
+  },
+  "range_scans": {
+    "LSMKV": {
+      "ops": 200,
+      "ops_per_second": 25558.938903868628,
+      "p50_us": 37.50000905711204,
+      "p95_us": 46.50000482797623,
+      "p99_us": 86.62499021738768,
+      "mean_us": 39.125254916143604,
+      "rows_per_scan": 100
+    },
+    "SQLite": {
+      "ops": 200,
+      "ops_per_second": 31815.060541183208,
+      "p50_us": 31.12500417046249,
+      "p95_us": 34.042008337564766,
+      "p99_us": 58.04200191050768,
+      "mean_us": 31.431654788320884,
+      "rows_per_scan": 100
+    }
+  },
+  "full_scan": {
+    "LSMKV": {
+      "rows": 50000,
+      "seconds": 0.01486087498778943,
+      "rows_per_second": 3364539.439372375
+    },
+    "SQLite": {
+      "rows": 50000,
+      "seconds": 0.01860912499250844,
+      "rows_per_second": 2686853.896683951
+    }
+  },
+  "disk_bytes": {
+    "LSMKV": 7514122,
+    "SQLite": 8683520
+  }
+}

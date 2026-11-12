@@ -110,3 +110,29 @@ verification. The relocated crash harness passed a one-run, 300-key-limit smoke
 check with 266 acknowledged writes and zero missing/corrupt entries. The moved
 benchmark module's Bloom/write/read/scan functions were smoke-checked, and all
 Python modules compiled successfully.
+
+## Later read-path optimization and SQLite comparison
+
+Recorded 12 November 2026. The active read path now caches SSTable readers and
+memory-maps SSTables; point reads reject keys outside a table's key range before
+the Bloom-filter and sparse-index lookup. Scans skip SSTables whose key ranges
+cannot overlap the requested range and use optimized merge paths for one or two
+sources. These changes are reflected in the current `lsm_engine/` implementation.
+
+Three single-run reports are saved as `benchmark_results/after_run1.json` through
+`after_run3.json`. Each compares 50,000 keys with 128-byte values against SQLite
+on Python 3.14.6 and macOS 27.2.1. LSMKV won durable writes, sequential and
+random bulk writes, missing-key point reads, full scans, and disk usage in all
+three runs. SQLite won present-key point reads and 100-row range scans in all
+three. The reports record that LSMKV reads use SSTables after close/reopen;
+SQLite uses WAL, with FULL synchronous mode for durable writes and OFF for bulk
+writes. Answers were checked against a Python dictionary.
+
+These are indicative results from three runs on one host, not a statistical
+study or a universal performance claim. The older `before_run3.json` is not a
+perfectly controlled before/after comparison: its platform string differs, and
+its present and missing point-read figures are dramatically slower than the
+other reports, suggesting an earlier read-path issue. The before/after files
+are retained as benchmark records; use the three `after_run` reports for the
+current comparison. See `docs/PRESENTATION_GUIDE.md` for a concise presentation
+table and the benchmark command.

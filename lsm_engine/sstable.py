@@ -26,6 +26,7 @@ Footer:
   magic        : 8 bytes  b'SSTABLE1'
 """
 
+import mmap
 import os
 import struct
 import zlib
@@ -111,25 +112,35 @@ class SSTableReader:
     def __init__(self, path: str):
         self.path = path
         self._f = open(path, 'rb')
+        self._mm = None
         try:
-            self._load_footer()
+            size = os.fstat(self._f.fileno()).st_size
+            # Empty/corrupt tiny files still go through footer validation below.
+            if size > 0:
+                self._mm = mmap.mmap(self._f.fileno(), 0, access=mmap.ACCESS_READ)
+            self._load_footer(size)
             self._load_index()
             self._load_bloom()
+            self._last_key = self._discover_last_key()
         except BaseException:
-            self._f.close()
+            self.close()
             raise
 
-    def _load_footer(self):
-        self._f.seek(-_FOOTER_SIZE, 2)
-        raw = self._f.read(_FOOTER_SIZE)
+    def _slice(self, offset: int, size: int) -> bytes:
+        """Return a bytes slice of the mmap (one copy of the requested span)."""
+        return self._mm[offset:offset + size]
+
+    def _load_footer(self, size: int):
+        if size < _FOOTER_SIZE:
+            raise ValueError(f'Bad SSTable magic in {self.path}: file too small')
+        raw = self._mm[size - _FOOTER_SIZE:size]
         self._idx_off, self._bloom_off, self._idx_sz, self._bloom_sz, magic = \
             struct.unpack(_FOOTER_FMT, raw)
         if magic != _MAGIC:
             raise ValueError(f'Bad SSTable magic in {self.path}: {magic!r}')
 
     def _load_index(self):
-        self._f.seek(self._idx_off)
-        raw      = self._f.read(self._idx_sz)
+        raw = self._slice(self._idx_off, self._idx_sz)
         body, crc_b = raw[:-4], raw[-4:]
         if (zlib.crc32(body) & 0xFFFFFFFF) != struct.unpack('>I', crc_b)[0]:
             raise ValueError(f'Index CRC mismatch in {self.path}')
@@ -143,43 +154,69 @@ class SSTableReader:
             self._index.append((key, off, sz))
 
     def _load_bloom(self):
-        self._f.seek(self._bloom_off)
-        raw      = self._f.read(self._bloom_sz)
+        raw = self._slice(self._bloom_off, self._bloom_sz)
         body, crc_b = raw[:-4], raw[-4:]
         if (zlib.crc32(body) & 0xFFFFFFFF) != struct.unpack('>I', crc_b)[0]:
             raise ValueError(f'Bloom CRC mismatch in {self.path}')
         self._bloom = BloomFilter.deserialize(body)
+
+    def _discover_last_key(self) -> Optional[bytes]:
+        """Walk the final data block once so point reads can reject out-of-range keys."""
+        if not self._index:
+            return None
+        _, offset, size = self._index[-1]
+        data = self._slice(offset, size)
+        pos = 0
+        last = None
+        n = len(data)
+        while pos + _ENTRY_HDR <= n:
+            klen, vlen, _flags = struct.unpack_from(_ENTRY_FMT, data, pos)
+            pos += _ENTRY_HDR
+            last = data[pos:pos + klen]
+            pos += klen + vlen
+        return last
 
 
     def may_contain(self, key: bytes) -> bool:
         return self._bloom.may_contain(key)
 
     def get(self, key: bytes):
-        if not self._index or not self.may_contain(key):
+        if not self._index:
+            return None
+        # Cheap range gate before the Bloom filter (helps missing-key workloads).
+        if key < self._index[0][0] or (self._last_key is not None and key > self._last_key):
+            return None
+        if not self.may_contain(key):
             return None
         _, offset, size = self._index[self._block_idx(key)]
-        self._f.seek(offset)
-        return self._search_block(self._f.read(size), key)
+        return self._search_block(self._slice(offset, size), key)
 
     def scan(self, start=None, end=None):
         first = self._block_idx(start) if start is not None else 0
-        for first_key, offset, size in self._index[first:]:
+        # Avoid slicing the rest of a potentially large sparse index for each
+        # short range scan. Most scans visit only a handful of blocks.
+        unpack_from = struct.unpack_from
+        hdr = _ENTRY_HDR
+        fmt = _ENTRY_FMT
+        for block in range(first, len(self._index)):
+            first_key, offset, size = self._index[block]
             if end is not None and first_key >= end:
                 return
-            self._f.seek(offset)
-            data = self._f.read(size)
+            data = self._slice(offset, size)
             pos = 0
-            while pos < len(data):
-                klen, vlen, flags = struct.unpack_from(_ENTRY_FMT, data, pos)
-                pos += _ENTRY_HDR
-                key = data[pos:pos+klen]
+            n = len(data)
+            while pos + hdr <= n:
+                klen, vlen, flags = unpack_from(fmt, data, pos)
+                pos += hdr
+                key = data[pos:pos + klen]
                 pos += klen
-                value = data[pos:pos+vlen]
-                pos += vlen
                 if start is not None and key < start:
+                    pos += vlen
                     continue
                 if end is not None and key >= end:
                     return
+                value = data[pos:pos + vlen]
+                pos += vlen
                 yield key, value, bool(flags & 1)
 
     def _block_idx(self, key: bytes) -> int:
@@ -195,17 +232,23 @@ class SSTableReader:
         return result
 
     def _search_block(self, data: bytes, target: bytes) -> Optional[Tuple[bytes, bool]]:
-        """Linear scan of an old-format (non-prefix-compressed) block."""
+        """Linear scan of a sorted block; stop once keys pass the target."""
         pos = 0
-        while pos < len(data):
-            if pos + _ENTRY_HDR > len(data):
-                break
-            klen, vlen, flags = struct.unpack(_ENTRY_FMT, data[pos:pos+_ENTRY_HDR])
-            pos  += _ENTRY_HDR
-            key   = data[pos:pos+klen]; pos += klen
-            value = data[pos:pos+vlen]; pos += vlen
+        n = len(data)
+        unpack_from = struct.unpack_from
+        hdr = _ENTRY_HDR
+        fmt = _ENTRY_FMT
+        while pos + hdr <= n:
+            klen, vlen, flags = unpack_from(fmt, data, pos)
+            pos += hdr
+            end_key = pos + klen
+            key = data[pos:end_key]
             if key == target:
-                return (value, bool(flags & 0x01))
+                end_val = end_key + vlen
+                return (data[end_key:end_val], bool(flags & 0x01))
+            if key > target:
+                return None
+            pos = end_key + vlen
         return None
 
 
@@ -213,5 +256,13 @@ class SSTableReader:
     def first_key(self):
         return self._index[0][0] if self._index else None
 
+    @property
+    def last_key(self):
+        return self._last_key
+
     def close(self):
-        self._f.close()
+        if self._mm is not None:
+            self._mm.close()
+            self._mm = None
+        if not self._f.closed:
+            self._f.close()
