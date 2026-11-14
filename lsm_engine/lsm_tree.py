@@ -8,6 +8,7 @@ import heapq
 import os
 import threading
 import uuid
+from collections import OrderedDict
 from contextlib import ExitStack
 
 from ._utils import fsync_dir
@@ -21,6 +22,7 @@ MEMTABLE_LIMIT = 4 * 1024 * 1024
 L0_COMPACT_TRIGGER = 4
 BASE_LEVEL_BYTES = 10 * 1024 * 1024
 LEVEL_MULTIPLIER = 10
+READER_CACHE_LIMIT = 32
 
 
 def _b(value):
@@ -42,6 +44,12 @@ class LSMTree:
         self._bg_error = None
         self._manifest = Manifest(self.dir)
         self._memtable = SkipList()
+        # Open SSTable readers, keyed by path. Each holds its parsed sparse
+        # index and Bloom filter, so point reads skip the per-call reload.
+        # Guarded by self._lock; entries are dropped before a file is deleted.
+        self._readers = OrderedDict()
+        self._reader_pins = {}
+        self._retired_readers = {}
         self._cleanup_orphans()
         self._wal = WAL(os.path.join(self.dir, 'wal.log'), sync_writes=sync_writes)
         fsync_dir(self.dir)
@@ -55,6 +63,54 @@ class LSMTree:
             raise ValueError('Database is closed')
         if self._bg_error is not None:
             raise RuntimeError('Background compaction failed') from self._bg_error
+
+    def _reader(self, path):
+        """Return the cached reader for path. Caller must hold self._lock."""
+        reader = self._readers.get(path)
+        if reader is None:
+            self._trim_readers(READER_CACHE_LIMIT - 1)
+            reader = self._readers[path] = SSTableReader(path)
+        self._readers.move_to_end(path)
+        return reader
+
+    def _trim_readers(self, limit=READER_CACHE_LIMIT):
+        """Evict least recently used, unpinned readers; caller holds _lock.
+
+        Active scans may temporarily exceed the limit, just as the original
+        scan held every input open. Their readers are trimmed when released.
+        """
+        for path in list(self._readers):
+            if len(self._readers) <= limit:
+                break
+            if not self._reader_pins.get(path, 0):
+                self._readers.pop(path).close()
+
+    def _drop_reader(self, path):
+        """Forget a cached reader, closing it after any active scans finish."""
+        reader = self._readers.pop(path, None)
+        if reader is not None:
+            if self._reader_pins.get(path, 0):
+                self._retired_readers[path] = reader
+            else:
+                reader.close()
+
+    def _pin_reader(self, path):
+        """Get a cached reader and pin its file handle for a scan."""
+        reader = self._reader(path)
+        self._reader_pins[path] = self._reader_pins.get(path, 0) + 1
+        return reader
+
+    def _unpin_reader(self, path):
+        """Release a scan's pin; caller must hold self._lock."""
+        remaining = self._reader_pins[path] - 1
+        if remaining:
+            self._reader_pins[path] = remaining
+            return
+        del self._reader_pins[path]
+        retired = self._retired_readers.pop(path, None)
+        if retired is not None:
+            retired.close()
+        self._trim_readers()
 
     def put(self, key, value):
         key, value = _b(key), _b(value)
@@ -78,23 +134,24 @@ class LSMTree:
 
     def get(self, key):
         key = _b(key)
-        # Keep files pinned by the lock until their readers are closed.
+        # The lock keeps compaction from deleting a file mid-read. Cached
+        # readers mmap the SST, so lookups do not share a mutable file offset.
         with self._lock:
             self._check_open()
             hit = self._memtable.get(key)
             if hit is not None:
                 value, deleted = hit
-                return None if deleted else _s(value)
+                if deleted:
+                    return None
+                return _s(value)
             for level in self._manifest.levels:
                 for path in reversed(level):
-                    reader = SSTableReader(path)
-                    try:
-                        hit = reader.get(key)
-                    finally:
-                        reader.close()
+                    hit = self._reader(path).get(key)
                     if hit is not None:
                         value, deleted = hit
-                        return None if deleted else _s(value)
+                        if deleted:
+                            return None
+                        return _s(value)
         return None
 
     def scan(self, start=None, end=None):
@@ -104,13 +161,35 @@ class LSMTree:
         with ExitStack() as resources:
             with self._lock:
                 self._check_open()
-                # Snapshot RAM; open files before compaction can unlink them.
-                sources = [iter(list(self._memtable.scan(start, end)))]
+                # Snapshot RAM; pin files before compaction can unlink them.
+                sources = []
+                mem_hits = list(self._memtable.scan(start, end))
+                if mem_hits:
+                    sources.append(iter(mem_hits))
                 for level in self._manifest.levels:
                     for path in reversed(level):
-                        reader = SSTableReader(path)
-                        resources.callback(reader.close)
+                        reader = self._pin_reader(path)
+                        # Skip SSTables whose key range cannot intersect [start, end).
+                        first = reader.first_key
+                        last = reader.last_key
+                        if first is None:
+                            resources.callback(self._unpin_scan_reader, path)
+                            continue
+                        if end is not None and first >= end:
+                            resources.callback(self._unpin_scan_reader, path)
+                            continue
+                        if start is not None and last is not None and last < start:
+                            resources.callback(self._unpin_scan_reader, path)
+                            continue
+                        resources.callback(self._unpin_scan_reader, path)
                         sources.append(reader.scan(start, end))
+            # Fast paths: skip the heap when only one or two sources are live.
+            if len(sources) == 1:
+                yield from self._emit_scan(sources[0])
+                return
+            if len(sources) == 2:
+                yield from self._merge_two_scans(sources[0], sources[1])
+                return
             heap = []
             for priority, source in enumerate(sources):
                 entry = next(source, None)
@@ -129,6 +208,45 @@ class LSMTree:
                 last_key = key
                 if not deleted:
                     yield _s(key), _s(value)
+
+    @staticmethod
+    def _emit_scan(source):
+        for key, value, deleted in source:
+            if not deleted:
+                yield _s(key), _s(value)
+
+    @staticmethod
+    def _merge_two_scans(newer, older):
+        """Newest-wins merge of two sorted iterators without heapq overhead."""
+        a = next(newer, None)
+        b = next(older, None)
+        last_key = None
+        while a is not None and b is not None:
+            if a[0] <= b[0]:
+                key, value, deleted = a
+                a = next(newer, None)
+            else:
+                key, value, deleted = b
+                b = next(older, None)
+            if key == last_key:
+                continue
+            last_key = key
+            if not deleted:
+                yield _s(key), _s(value)
+        rest = a if a is not None else b
+        src = newer if a is not None else older
+        while rest is not None:
+            key, value, deleted = rest
+            rest = next(src, None)
+            if key == last_key:
+                continue
+            last_key = key
+            if not deleted:
+                yield _s(key), _s(value)
+
+    def _unpin_scan_reader(self, path):
+        with self._lock:
+            self._unpin_reader(path)
 
     def _flush_memtable(self):
         """Caller holds _write_lock; keep RAM visible until MANIFEST commits."""
@@ -194,6 +312,7 @@ class LSMTree:
             self._manifest.apply_compaction(
                 {src_level: src, dst_level: dst}, {dst_level: outputs})
             for old in inputs:
+                self._drop_reader(old)  # close the handle before unlinking
                 os.remove(old)
 
     def _recover(self):
@@ -230,6 +349,13 @@ class LSMTree:
             if self._closed:
                 return
             self._flush_memtable()
+            with self._lock:
+                for path, reader in self._readers.items():
+                    if self._reader_pins.get(path, 0):
+                        self._retired_readers[path] = reader
+                    else:
+                        reader.close()
+                self._readers.clear()
             self._wal.close()
             self._closed = True
 
